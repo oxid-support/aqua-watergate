@@ -10,6 +10,12 @@ This image runs **Gate 0 + Gate 1**:
 
 No runtime, no browser, no docker-compose.
 
+## Installation
+```bash
+git clone https://github.com/oxid-support/aqua-watergate
+cd aqua-watergate
+```
+
 ## Build
 ```bash
 docker build -t gate-runner:latest .
