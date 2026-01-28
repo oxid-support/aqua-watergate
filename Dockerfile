@@ -5,10 +5,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY gaterunner.py /app/gaterunner.py
+COPY gaterunner/ /app/gaterunner/
 
 ENV OUT_DIR=/out
 RUN mkdir -p /out && chmod 777 /out
 VOLUME ["/out"]
 
-ENTRYPOINT ["python", "/app/gaterunner.py"]
+ENTRYPOINT ["python", "-m", "gaterunner"]

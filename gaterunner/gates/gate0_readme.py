@@ -1,125 +1,19 @@
-#!/usr/bin/env python3
-import argparse
-import json
-import os
+"""
+Gate 0: README Contract
+
+README.md must exist at repo root and contain sections for:
+- Compatibility: must allow extracting at least one supported OXID eShop compilation version
+- Installation: must provide a fenced code block with 'composer require ...'
+- Activation: must provide a fenced code block with 'oe:module:activate'
+- Migration (conditional): only required if module has migrations
+"""
+
 import re
-import shutil
-import tempfile
-import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-
-# Gate rules (English):
-#
-# Gate 0 (README contract):
-# - README.md MUST exist at repo root (exact file name: README.md)
-# - README.md must contain sections for:
-#   - Compatibility: must allow extracting at least one supported OXID eShop compilation version (e.g. 7.4.0 or 7.4.x)
-#   - Installation: MUST provide a fenced code block that contains a "composer require ..." command
-#   - Activation: MUST provide a fenced code block that contains an "oe:module:activate" command
-# - Migration is CONDITIONAL:
-#   - If module migrations are detected by repository structure:
-#       - migration/ (or migrations/) exists
-#       - contains migrations.yml (or migration.yml / *.yaml)
-#     then:
-#       - README must provide a Migration(s) section with a fenced code block containing a migrations command
-#         (migrations:migrate via oe-console or oe-eshop-doctrine_migration or oe-eshop-db_migrate)
-#       - migration data folder (default: migration/data or derived from migrations_paths) must contain at least one .php file
-#   - If no migrations exist: migration checks are skipped (do NOT fail)
-#
-# IMPORTANT: For Installation/Migration/Activation, Gate 0 does NOT simply pick the first heading match.
-# It scans ALL matching headings and selects the first section that actually contains the required command
-# inside a fenced code block. This avoids false positives like "Development installation".
-#
-# Gate 1 (Templates instrumented):
-# - Templates are Smarty (.tpl) or Twig (.twig).
-# - If NO templates exist in the repo => PASS.
-# - If templates exist:
-#   - For each template that contains HTML markup, require at least one `data-qa=...` attribute in that file.
-#   - Templates without any HTML markup (e.g. only includes/extends) are ignored.
-#
-# Transport rule:
-# - Only GitHub HTTPS repo URLs are allowed (no local paths).
-
-
-@dataclass
-class GateResult:
-    status: str  # "pass" | "fail"
-    details: List[str]
-
-
-def write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="ignore")
-
-
-def run_cmd(cmd: List[str], cwd: Optional[Path] = None, timeout: int = 600) -> Tuple[int, str]:
-    import subprocess
-
-    try:
-        cp = subprocess.run(
-            cmd,
-            cwd=str(cwd) if cwd else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        return cp.returncode, cp.stdout
-    except subprocess.TimeoutExpired as e:
-        return 124, (e.stdout or "") + "\n[TIMEOUT]\n"
-
-
-def sanitize_url(url: str) -> str:
-    """Remove credentials from URL for safe logging/output."""
-    return re.sub(r"https://[^@]+@github\.com", "https://github.com", url)
-
-
-def is_allowed_github_repo_url(url: str) -> bool:
-    """
-    Only allow GitHub HTTPS repo URLs.
-    Accepted:
-      - https://github.com/org/repo
-      - https://github.com/org/repo.git
-      - https://user:token@github.com/org/repo
-      - https://token@github.com/org/repo
-    Not accepted:
-      - .../tree/branch (web URLs)
-      - ssh URLs (git@github.com:...)
-      - non-GitHub hosts
-    """
-    url = (url or "").strip()
-    # Allow optional user:pass@ or token@ before github.com
-    return re.match(r"^https://(?:[^@\s]+@)?github\.com/[^/\s]+/[^/\s]+(?:\.git)?$", url) is not None
-
-
-def clone_repo(url: str, ref: str) -> Path:
-    tmp = Path(tempfile.mkdtemp(prefix="module_"))
-
-    # Try shallow clone with branch/tag
-    rc, _out = run_cmd(["git", "clone", "--depth", "1", "--branch", ref, url, str(tmp)], timeout=600)
-    if rc == 0:
-        return tmp
-
-    # Fallback: full clone then checkout (supports commit hashes)
-    shutil.rmtree(tmp, ignore_errors=True)
-    tmp = Path(tempfile.mkdtemp(prefix="module_"))
-    rc, out2 = run_cmd(["git", "clone", url, str(tmp)], timeout=600)
-    if rc != 0:
-        raise RuntimeError(f"git clone failed:\n{out2}")
-
-    rc, out3 = run_cmd(["git", "checkout", ref], cwd=tmp, timeout=300)
-    if rc != 0:
-        raise RuntimeError(f"git checkout '{ref}' failed:\n{out3}")
-
-    return tmp
+from ..utils import read_text
+from .base import GateResult
 
 
 # -----------------------------
@@ -156,6 +50,7 @@ def iter_headings(markdown: str) -> List[Tuple[int, str, int]]:
 
 
 def extract_section_by_heading_index(markdown: str, heading_idx: int, heading_level: int) -> str:
+    """Extract section content below a heading."""
     lines = markdown.splitlines()
     heading_re = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*$")
 
@@ -173,9 +68,7 @@ def extract_section_by_heading_index(markdown: str, heading_idx: int, heading_le
 
 
 def extract_sections_all(markdown: str, title_regexes: List[str]) -> List[Tuple[str, str]]:
-    """
-    Return list of (heading_text, section_body) for ALL matching headings.
-    """
+    """Return list of (heading_text, section_body) for ALL matching headings."""
     res: List[Tuple[str, str]] = []
     for idx, text, level in iter_headings(markdown):
         norm = re.sub(r"\s+", " ", text).strip()
@@ -186,10 +79,7 @@ def extract_sections_all(markdown: str, title_regexes: List[str]) -> List[Tuple[
 
 
 def extract_fenced_code_blocks(section_md: str) -> List[str]:
-    """
-    Extract all fenced code block contents from a markdown fragment.
-    Supports ```lang ... ``` and plain ``` ... ```.
-    """
+    """Extract all fenced code block contents from a markdown fragment."""
     blocks: List[str] = []
     pos = 0
     while True:
@@ -247,7 +137,7 @@ def pick_section_with_compatibility(
 # Command detection
 # -----------------------------
 def has_composer_require_command(code: str) -> bool:
-    # Allow optional prompt prefixes ($, >, #)
+    """Check if code contains a composer require command."""
     for line in code.splitlines():
         if re.match(r"^\s*(?:[$>#]\s*)?composer\s+require\b", line):
             return True
@@ -255,7 +145,7 @@ def has_composer_require_command(code: str) -> bool:
 
 
 def has_migration_command(code: str) -> bool:
-    # Accept common OXID migration command forms
+    """Check if code contains an OXID migration command."""
     patterns = [
         r"\boe-eshop-db_migrate\b.*\bmigrations:migrate\b",
         r"\boe-eshop-doctrine_migration\b.*\bmigrations:migrate\b",
@@ -270,6 +160,7 @@ def has_migration_command(code: str) -> bool:
 
 
 def has_activation_command(code: str) -> bool:
+    """Check if code contains an oe:module:activate command."""
     for line in code.splitlines():
         if re.search(r"\boe:module:activate\b", line):
             return True
@@ -335,15 +226,11 @@ def parse_oxid_compilation_versions(text: str) -> Tuple[List[str], Dict[str, str
 
 
 # -----------------------------
-# Migration detection (repo structure)
+# Migration detection
 # -----------------------------
 def _extract_migration_data_dir_from_config(config_text: str) -> str:
     """
-    Best-effort YAML parsing (without external deps):
-    Look for:
-      migrations_paths:
-        'Some\\Namespace': data
-    Return the first mapped value (e.g. "data"). Default: "data".
+    Best-effort YAML parsing: Look for migrations_paths and return the mapped value.
     """
     lines = config_text.splitlines()
     in_block = False
@@ -357,7 +244,6 @@ def _extract_migration_data_dir_from_config(config_text: str) -> str:
         if not in_block:
             continue
 
-        # End block on next top-level key (no indentation)
         if line and not line.startswith(" "):
             break
 
@@ -372,10 +258,7 @@ def _extract_migration_data_dir_from_config(config_text: str) -> str:
 
 def detect_module_migrations(module_dir: Path) -> Dict[str, object]:
     """
-    Detect OXID module migrations by structure:
-      - migration/ (or migrations/) directory exists
-      - contains migrations.yml (or migration.yml / *.yaml)
-      - data folder (default: migration/data or derived from migrations_paths) contains at least one .php file
+    Detect OXID module migrations by structure.
     """
     issues: List[str] = []
 
@@ -407,7 +290,6 @@ def detect_module_migrations(module_dir: Path) -> Dict[str, object]:
             config_path = p
             break
 
-    # Treat as "has migrations" only if config exists
     if config_path is None:
         return meta
 
@@ -434,9 +316,14 @@ def detect_module_migrations(module_dir: Path) -> Dict[str, object]:
 
 
 # -----------------------------
-# Gate 0
+# Gate 0 main function
 # -----------------------------
 def gate0_readme_contract(module_dir: Path) -> Tuple[GateResult, Dict[str, object]]:
+    """
+    Check Gate 0: README contract.
+
+    Returns (GateResult, metadata).
+    """
     readme_path = module_dir / "README.md"
     if not readme_path.exists():
         return GateResult("fail", ["README.md is missing"]), {"matchedHeadings": {}}
@@ -473,7 +360,7 @@ def gate0_readme_contract(module_dir: Path) -> Tuple[GateResult, Dict[str, objec
     details: List[str] = []
     meta: Dict[str, object] = {"matchedHeadings": {}, "migration": mig_meta}
 
-    # Compatibility: pick a section that yields compilation versions
+    # Compatibility
     compat_body, compat_heading, compat_candidates, compat_versions, compat_branch_map = pick_section_with_compatibility(
         md, heading_rules["Compatibility"]
     )
@@ -487,7 +374,7 @@ def gate0_readme_contract(module_dir: Path) -> Tuple[GateResult, Dict[str, objec
         meta["matchedHeadings"]["Compatibility"] = compat_heading or ""
         meta["compatibility"] = {"oxidCompilation": compat_versions, "branchMap": compat_branch_map}
 
-    # Installation: pick section that actually contains composer require
+    # Installation
     install_body, install_heading, install_candidates = pick_section_with_required_command(
         md, heading_rules["Installation"], has_composer_require_command
     )
@@ -499,7 +386,7 @@ def gate0_readme_contract(module_dir: Path) -> Tuple[GateResult, Dict[str, objec
     else:
         meta["matchedHeadings"]["Installation"] = install_heading or ""
 
-    # Activation: pick section that actually contains oe:module:activate
+    # Activation
     act_body, act_heading, act_candidates = pick_section_with_required_command(
         md, heading_rules["Activation"], has_activation_command
     )
@@ -511,7 +398,7 @@ def gate0_readme_contract(module_dir: Path) -> Tuple[GateResult, Dict[str, objec
     else:
         meta["matchedHeadings"]["Activation"] = act_heading or ""
 
-    # Migration: only required if migrations are detected by structure
+    # Migration (conditional)
     if migrations_required:
         mig_body, mig_heading, mig_candidates = pick_section_with_required_command(
             md, heading_rules["Migration"], has_migration_command
@@ -532,182 +419,7 @@ def gate0_readme_contract(module_dir: Path) -> Tuple[GateResult, Dict[str, objec
     if details:
         return GateResult("fail", details), meta
 
-    # If no migrations are required, include an informational note
     if not migrations_required:
         return GateResult("pass", ["No module migrations detected (Migration check skipped)"]), meta
 
     return GateResult("pass", []), meta
-
-
-# -----------------------------
-# Gate 1
-# -----------------------------
-def is_template_file(path: Path) -> bool:
-    name = path.name.lower()
-    return name.endswith(".tpl") or name.endswith(".twig")
-
-
-def should_skip_path(path: Path) -> bool:
-    # Skip common dependency and VCS dirs
-    skip_parts = {".git", "vendor", "node_modules", ".idea", ".cache", ".github"}
-    return any(part in skip_parts for part in path.parts)
-
-
-def find_template_files(root: Path) -> List[Path]:
-    files: List[Path] = []
-    for p in root.rglob("*"):
-        if not p.is_file():
-            continue
-        if should_skip_path(p):
-            continue
-        if is_template_file(p):
-            files.append(p)
-    return sorted(files)
-
-
-_HTML_TAG_RE = re.compile(r"<\s*[a-zA-Z][^>]*>")
-
-
-def has_html_markup(text: str) -> bool:
-    return _HTML_TAG_RE.search(text) is not None
-
-
-def has_data_qa(text: str) -> bool:
-    # Require quoted value: data-qa="..." or data-qa='...'
-    return re.search(r"\bdata-qa\s*=\s*(['\"]).+?\1", text) is not None
-
-
-def gate1_templates_data_qa(module_dir: Path) -> Tuple[GateResult, Dict[str, object]]:
-    templates = find_template_files(module_dir)
-    meta: Dict[str, object] = {
-        "templateCount": len(templates),
-        "templatesChecked": [],
-        "templatesIgnoredNoMarkup": [],
-    }
-
-    if len(templates) == 0:
-        return GateResult("pass", ["No Smarty/Twig templates found (Gate 1 skipped)"]), meta
-
-    missing: List[str] = []
-    checked = 0
-    ignored = 0
-
-    for t in templates:
-        rel = str(t.relative_to(module_dir))
-        text = read_text(t)
-
-        if not has_html_markup(text):
-            ignored += 1
-            meta["templatesIgnoredNoMarkup"].append(rel)
-            continue
-
-        checked += 1
-        meta["templatesChecked"].append(rel)
-
-        if not has_data_qa(text):
-            missing.append(f"Template missing any data-qa attribute: {rel}")
-
-    meta["templatesWithMarkupChecked"] = checked
-    meta["templatesIgnoredNoMarkupCount"] = ignored
-
-    if checked == 0:
-        return GateResult("pass", ["Templates found, but none contained HTML markup (nothing to instrument)"]), meta
-
-    if missing:
-        return GateResult("fail", missing), meta
-
-    return GateResult(
-        "pass",
-        [f"All templates with HTML markup contain at least one data-qa attribute ({checked} checked)"],
-    ), meta
-
-
-# -----------------------------
-# Main
-# -----------------------------
-def main() -> int:
-    parser = argparse.ArgumentParser(description="GateRunner – Gate 0 (README) + Gate 1 (templates) static checks (GitHub only)")
-    parser.add_argument("--module-url", required=True, help="GitHub repo URL (e.g. https://github.com/org/repo.git)")
-    parser.add_argument("--module-ref", default="main", help="Branch/tag/commit (default: main)")
-    parser.add_argument("--out", default=os.environ.get("OUT_DIR", "/out"), help="Output directory (default: /out)")
-    args = parser.parse_args()
-
-    out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    module_url = (args.module_url or "").strip()
-    if not is_allowed_github_repo_url(module_url):
-        write_text(
-            out_dir / "gate-result.json",
-            json.dumps(
-                {
-                    "error": "Only GitHub HTTPS repo URLs are allowed",
-                    "expected": "https://github.com/<org>/<repo> or https://github.com/<org>/<repo>.git",
-                    "got": sanitize_url(module_url),
-                },
-                indent=2,
-            ),
-        )
-        return 2
-
-    temp_dir: Optional[Path] = None
-    try:
-        temp_dir = clone_repo(module_url, args.module_ref)
-        module_dir = temp_dir
-    except Exception as e:
-        error_msg = str(e)
-        # Sanitize any credentials from error message
-        error_msg = re.sub(r"https://[^@\s]+@github\.com", "https://github.com", error_msg)
-        write_text(out_dir / "gate-result.json", json.dumps({"error": f"clone failed: {error_msg}"}, indent=2))
-        if temp_dir:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        return 2
-
-    result: Dict[str, object] = {
-        "moduleUrl": sanitize_url(module_url),
-        "moduleRef": args.module_ref,
-        "modulePath": str(module_dir),
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "gates": {},
-    }
-
-    failed = False
-
-    # Gate 0 (always attempt) + explicit README existence check
-    readme_path = module_dir / "README.md"
-    if not readme_path.exists():
-        result["gates"]["gate0"] = {"status": "fail", "details": ["README.md is missing (required file at repo root)"]}
-        result["gate0Meta"] = {"matchedHeadings": {}}
-        failed = True
-    else:
-        try:
-            g0, g0meta = gate0_readme_contract(module_dir)
-            result["gates"]["gate0"] = {"status": g0.status, "details": g0.details}
-            result["gate0Meta"] = g0meta
-            if g0.status != "pass":
-                failed = True
-        except Exception as e:
-            result["gates"]["gate0"] = {"status": "fail", "details": [f"Gate 0 crashed: {e!r}"]}
-            failed = True
-
-    # Gate 1 (always run, even if Gate 0 failed)
-    try:
-        g1, g1meta = gate1_templates_data_qa(module_dir)
-        result["gates"]["gate1"] = {"status": g1.status, "details": g1.details}
-        result["gate1Meta"] = g1meta
-        if g1.status != "pass":
-            failed = True
-    except Exception as e:
-        result["gates"]["gate1"] = {"status": "fail", "details": [f"Gate 1 crashed: {e!r}"]}
-        failed = True
-
-    write_text(out_dir / "gate-result.json", json.dumps(result, indent=2))
-
-    if temp_dir:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-    return 1 if failed else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
