@@ -77,19 +77,27 @@ def run_cmd(cmd: List[str], cwd: Optional[Path] = None, timeout: int = 600) -> T
         return 124, (e.stdout or "") + "\n[TIMEOUT]\n"
 
 
+def sanitize_url(url: str) -> str:
+    """Remove credentials from URL for safe logging/output."""
+    return re.sub(r"https://[^@]+@github\.com", "https://github.com", url)
+
+
 def is_allowed_github_repo_url(url: str) -> bool:
     """
     Only allow GitHub HTTPS repo URLs.
     Accepted:
       - https://github.com/org/repo
       - https://github.com/org/repo.git
+      - https://user:token@github.com/org/repo
+      - https://token@github.com/org/repo
     Not accepted:
       - .../tree/branch (web URLs)
       - ssh URLs (git@github.com:...)
       - non-GitHub hosts
     """
     url = (url or "").strip()
-    return re.match(r"^https://github\.com/[^/\s]+/[^/\s]+(?:\.git)?$", url) is not None
+    # Allow optional user:pass@ or token@ before github.com
+    return re.match(r"^https://(?:[^@\s]+@)?github\.com/[^/\s]+/[^/\s]+(?:\.git)?$", url) is not None
 
 
 def clone_repo(url: str, ref: str) -> Path:
@@ -635,7 +643,7 @@ def main() -> int:
                 {
                     "error": "Only GitHub HTTPS repo URLs are allowed",
                     "expected": "https://github.com/<org>/<repo> or https://github.com/<org>/<repo>.git",
-                    "got": module_url,
+                    "got": sanitize_url(module_url),
                 },
                 indent=2,
             ),
@@ -647,13 +655,16 @@ def main() -> int:
         temp_dir = clone_repo(module_url, args.module_ref)
         module_dir = temp_dir
     except Exception as e:
-        write_text(out_dir / "gate-result.json", json.dumps({"error": f"clone failed: {e!r}"}, indent=2))
+        error_msg = str(e)
+        # Sanitize any credentials from error message
+        error_msg = re.sub(r"https://[^@\s]+@github\.com", "https://github.com", error_msg)
+        write_text(out_dir / "gate-result.json", json.dumps({"error": f"clone failed: {error_msg}"}, indent=2))
         if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
         return 2
 
     result: Dict[str, object] = {
-        "moduleUrl": module_url,
+        "moduleUrl": sanitize_url(module_url),
         "moduleRef": args.module_ref,
         "modulePath": str(module_dir),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

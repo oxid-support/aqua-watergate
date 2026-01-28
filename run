@@ -1,0 +1,237 @@
+#!/bin/bash
+
+# Usage: ./run.sh <github-url> [branch]
+# Example: ./run.sh https://github.com/oxid-esales/module-template main
+#
+# For private repos, set GITHUB_USER and GITHUB_TOKEN or you'll be prompted.
+
+if [ -z "$1" ]; then
+    echo "Usage: ./run.sh <github-url> [branch]"
+    echo "Example: ./run.sh https://github.com/oxid-esales/module-template main"
+    echo ""
+    echo "For private repos:"
+    echo "  export GITHUB_USER=your_username"
+    echo "  export GITHUB_TOKEN=your_token"
+    exit 1
+fi
+
+MODULE_URL="$1"
+MODULE_REF="$2"
+
+# Function to build authenticated URL
+build_auth_url() {
+    local url="$1"
+    local user="$2"
+    local token="$3"
+
+    if [ -n "$user" ]; then
+        # https://USER:TOKEN@github.com/org/repo
+        echo "$url" | sed "s|https://github.com|https://${user}:${token}@github.com|"
+    else
+        # https://TOKEN@github.com/org/repo (works for PATs)
+        echo "$url" | sed "s|https://github.com|https://${token}@github.com|"
+    fi
+}
+
+# Function to fetch branches (with optional auth)
+fetch_branches() {
+    local url="$1"
+    local user="$2"
+    local token="$3"
+
+    if [ -n "$token" ]; then
+        local auth_url=$(build_auth_url "$url" "$user" "$token")
+        git ls-remote --heads "$auth_url" 2>/dev/null | awk -F'refs/heads/' '{print $2}' | sort
+    else
+        git ls-remote --heads "$url" 2>/dev/null | awk -F'refs/heads/' '{print $2}' | sort
+    fi
+}
+
+# Use existing credentials from environment
+GITHUB_USER="${GITHUB_USER:-}"
+TOKEN="${GITHUB_TOKEN:-$GH_TOKEN}"
+
+# Check if repo is accessible (with timeout to avoid hanging on private repos)
+check_access() {
+    local url="$1"
+    local pid
+
+    # Run git ls-remote in background
+    git ls-remote --heads "$url" >/dev/null 2>&1 &
+    pid=$!
+
+    # Wait up to 5 seconds
+    for i in 1 2 3 4 5; do
+        if ! kill -0 $pid 2>/dev/null; then
+            # Process finished
+            wait $pid
+            return $?
+        fi
+        sleep 1
+    done
+
+    # Timeout - kill the process
+    kill $pid 2>/dev/null
+    wait $pid 2>/dev/null
+    return 1
+}
+
+if [ -z "$TOKEN" ]; then
+    echo "Checking repository access..."
+    if ! check_access "$MODULE_URL"; then
+        echo "Repository not accessible. It might be private."
+        read -p "Enter GitHub username (or press Enter to skip): " GITHUB_USER
+
+        if [ -n "$GITHUB_USER" ]; then
+            read -s -p "Enter GitHub token: " TOKEN
+            echo ""
+        fi
+    fi
+fi
+
+# If no branch specified, show available branches
+if [ -z "$MODULE_REF" ]; then
+    echo "Fetching branches from $MODULE_URL ..."
+
+    BRANCHES=$(fetch_branches "$MODULE_URL" "$GITHUB_USER" "$TOKEN")
+
+    if [ -z "$BRANCHES" ]; then
+        echo "Error: Could not fetch branches. Check the URL or token."
+        exit 1
+    fi
+
+    # Prioritize main and master
+    PRIORITY_BRANCHES=""
+    OTHER_BRANCHES=""
+
+    while IFS= read -r branch; do
+        if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
+            PRIORITY_BRANCHES="$PRIORITY_BRANCHES$branch"$'\n'
+        else
+            OTHER_BRANCHES="$OTHER_BRANCHES$branch"$'\n'
+        fi
+    done <<< "$BRANCHES"
+
+    # Combine: priority first, then others
+    SORTED_BRANCHES="${PRIORITY_BRANCHES}${OTHER_BRANCHES}"
+    SORTED_BRANCHES=$(echo -n "$SORTED_BRANCHES" | sed '/^$/d')
+
+    # Display numbered list
+    echo ""
+    echo "Available branches:"
+    i=1
+    while IFS= read -r branch; do
+        echo "  $i) $branch"
+        i=$((i + 1))
+    done <<< "$SORTED_BRANCHES"
+
+    # Prompt user
+    echo ""
+    read -p "Select branch [1]: " selection
+    selection=${selection:-1}
+
+    # Get selected branch
+    MODULE_REF=$(echo "$SORTED_BRANCHES" | sed -n "${selection}p")
+
+    if [ -z "$MODULE_REF" ]; then
+        echo "Invalid selection."
+        exit 1
+    fi
+
+    echo ""
+    echo "Selected: $MODULE_REF"
+fi
+
+mkdir -p out
+
+echo ""
+echo "Running gate-runner for $MODULE_URL ($MODULE_REF)..."
+echo ""
+
+# Check if docker image exists
+if ! docker image inspect gate-runner:latest >/dev/null 2>&1; then
+    echo "Error: Docker image 'gate-runner:latest' not found."
+    echo "Run 'docker build -t gate-runner:latest .' first."
+    exit 1
+fi
+
+# Build URL for docker (with credentials if available)
+if [ -n "$TOKEN" ]; then
+    DOCKER_URL=$(build_auth_url "$MODULE_URL" "$GITHUB_USER" "$TOKEN")
+else
+    DOCKER_URL="$MODULE_URL"
+fi
+
+docker run --rm \
+    -v "$(pwd)/out:/out" \
+    gate-runner:latest \
+    --module-url "$DOCKER_URL" \
+    --module-ref "$MODULE_REF"
+
+EXIT_CODE=$?
+
+echo ""
+
+# Show results if file exists
+if [ -f "./out/gate-result.json" ]; then
+    RESULT=$(cat "./out/gate-result.json")
+
+    # Check for auth error - prompt for credentials and retry
+    if echo "$RESULT" | grep -q "could not read Username"; then
+        if [ -z "$TOKEN" ]; then
+            echo "Repository requires authentication."
+            read -p "Enter GitHub username (or press Enter to skip): " GITHUB_USER
+
+            if [ -n "$GITHUB_USER" ]; then
+                read -s -p "Enter GitHub token: " TOKEN
+                echo ""
+
+                if [ -n "$TOKEN" ]; then
+                    echo ""
+                    echo "Retrying with credentials..."
+                    echo ""
+
+                    DOCKER_URL=$(build_auth_url "$MODULE_URL" "$GITHUB_USER" "$TOKEN")
+
+                    docker run --rm \
+                        -v "$(pwd)/out:/out" \
+                        gate-runner:latest \
+                        --module-url "$DOCKER_URL" \
+                        --module-ref "$MODULE_REF"
+
+                    EXIT_CODE=$?
+
+                    if [ -f "./out/gate-result.json" ]; then
+                        RESULT=$(cat "./out/gate-result.json")
+                    fi
+                fi
+            fi
+        fi
+    fi
+
+    echo "$RESULT"
+    echo ""
+
+    # Check for remaining errors
+    if echo "$RESULT" | grep -q '"error"'; then
+        if echo "$RESULT" | grep -q "could not read Username"; then
+            echo "ERROR: Repository not accessible (private repo?)"
+            echo "Try: export GITHUB_USER=... && export GITHUB_TOKEN=..."
+        else
+            echo "ERROR: Failed to process repository - see details above"
+        fi
+        exit 1
+    fi
+
+    if [ $EXIT_CODE -eq 0 ]; then
+        echo "✓ All gates PASSED"
+    else
+        echo "✗ Some gates FAILED - see details above"
+    fi
+else
+    # No result file = actual error
+    echo "ERROR: gate-runner failed unexpectedly (exit code $EXIT_CODE)"
+    echo "No result file generated. Check if the module URL is correct."
+fi
+
+exit $EXIT_CODE

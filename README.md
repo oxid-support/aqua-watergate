@@ -10,10 +10,16 @@ This image runs **Gate 0 + Gate 1**:
 
 No runtime, no browser, no docker-compose.
 
+## Requirements
+- Docker
+- Bash
+- Git
+
 ## Installation
 ```bash
 git clone https://github.com/oxid-support/aqua-watergate
 cd aqua-watergate
+chmod +x run
 ```
 
 ## Build
@@ -25,6 +31,36 @@ docker build -t gate-runner:latest .
 Only GitHub repos are allowed.
 
 ```bash
+./run https://github.com/<org>/<repo>.git [branch]
+```
+
+**Examples:**
+```bash
+# Interactive branch selection (main/master prioritized)
+./run https://github.com/oxid-esales/module-template
+
+# With specific branch
+./run https://github.com/oxid-esales/module-template b-7.3.x
+```
+
+If no branch is specified, the script fetches available branches and displays them in a numbered list for selection. `main` and `master` are always shown first.
+
+**Private repositories:**
+```bash
+# Option 1: Environment variables
+export GITHUB_USER=your_username
+export GITHUB_TOKEN=your_token
+./run https://github.com/private-org/private-repo
+
+# Option 2: Interactive prompt (if branch fetch fails)
+./run https://github.com/private-org/private-repo
+# → prompts for username and token if needed
+```
+
+<details>
+<summary>Manual command (alternative)</summary>
+
+```bash
 mkdir -p out
 
 docker run --rm \
@@ -33,6 +69,7 @@ docker run --rm \
   --module-url "https://github.com/<org>/<repo>.git" \
   --module-ref "main"
 ```
+</details>
 
 ## Gate rules
 
